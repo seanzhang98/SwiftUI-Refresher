@@ -226,25 +226,30 @@ public struct RefreshableScrollView<Content: View, RefreshView: View>: View {
             // MARK: - 保护性的SwiftUIIntrospect调用
             .modifier(ProtectedIntrospectModifier(
                 onScrollViewFound: { scrollView in
-                    // 记录成功的introspect
-                    self.lastSuccessfulIntrospect = Date()
-                    self.introspectErrorCount = 0
-                    
+                    // 使用异步调度避免在视图更新期间修改状态
                     DispatchQueue.main.async {
+                        self.lastSuccessfulIntrospect = Date()
+                        self.introspectErrorCount = 0
                         self.uiScrollView = scrollView
                     }
                 },
                 onError: {
-                    self.introspectErrorCount += 1
-                    
-                    // 如果错误太多，尝试fallback方案
-                    if self.introspectErrorCount > 5 {
-                        print("⚠️ SwiftUIIntrospect errors detected, using fallback scroll detection")
+                    // 使用异步调度避免在视图更新期间修改状态
+                    DispatchQueue.main.async {
+                        self.introspectErrorCount += 1
+                        
+                        // 如果错误太多，尝试fallback方案
+                        if self.introspectErrorCount > 5 {
+                            print("⚠️ SwiftUIIntrospect errors detected, using fallback scroll detection")
+                        }
                     }
                 }
             ))
             .onChange(of: globalGeometry.frame(in: .global)) { val in
-                headerInset = val.minY
+                // 使用异步调度避免在视图更新期间修改状态
+                DispatchQueue.main.async {
+                    headerInset = val.minY
+                }
             }
             .onAppear {
                 DispatchQueue.main.async {
@@ -255,50 +260,58 @@ public struct RefreshableScrollView<Content: View, RefreshView: View>: View {
     }
     
     private func offsetChanged(_ val: CGFloat) {
-        isFingerDown = isTracking
-        distance = val - headerInset
-        state.dragPosition = normalize(from: 0, to: config.refreshAt, by: distance)
-        
-        // If the refresh state has settled, we are not touching the screen, and the offset has settled, we can signal the view to update itself.
-        if canRefresh, !isFingerDown, distance <= 0 {
-            renderLock = false
-        }
-        
-        guard canRefresh else {
-            canRefresh = distance <= config.resetPoint && !isFingerDown && state.mode != .refreshing
-            return
-        }
-        guard distance > 0, showRefreshControls else {
-            isRefresherVisible = false
-            return
-        }
-        
-        isRefresherVisible = true
-
-        if distance >= config.refreshAt, !renderLock {
-            #if !os(visionOS)
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            #endif
-            renderLock = true
-            canRefresh = false
-            set(mode: .refreshing)
+        // 将状态更新包装在异步调度中以避免在视图更新期间修改状态
+        DispatchQueue.main.async {
+            let newIsFingerDown = isTracking
+            let newDistance = val - headerInset
+            let newDragPosition = normalize(from: 0, to: config.refreshAt, by: newDistance)
             
-            refreshAction {
-                // The ordering here is important - calling `set` on the main queue after `refreshAction` prevents
-                // strange animaton behaviors on some complex views
-                DispatchQueue.main.asyncAfter(deadline: .now() + config.holdTime) {
-                    set(mode: .notRefreshing)
-                    self.renderLock = false
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + config.cooldown) {
-                        self.canRefresh = !isFingerDown
-                        self.isRefresherVisible = false
+            // 批量更新状态以提高性能
+            isFingerDown = newIsFingerDown
+            distance = newDistance
+            state.dragPosition = newDragPosition
+            
+            // If the refresh state has settled, we are not touching the screen, and the offset has settled, we can signal the view to update itself.
+            if canRefresh, !isFingerDown, distance <= 0 {
+                renderLock = false
+            }
+            
+            guard canRefresh else {
+                canRefresh = distance <= config.resetPoint && !isFingerDown && state.mode != .refreshing
+                return
+            }
+            guard distance > 0, showRefreshControls else {
+                isRefresherVisible = false
+                return
+            }
+            
+            isRefresherVisible = true
+
+            if distance >= config.refreshAt, !renderLock {
+                #if !os(visionOS)
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                #endif
+                renderLock = true
+                canRefresh = false
+                set(mode: .refreshing)
+                
+                refreshAction {
+                    // The ordering here is important - calling `set` on the main queue after `refreshAction` prevents
+                    // strange animaton behaviors on some complex views
+                    DispatchQueue.main.asyncAfter(deadline: .now() + config.holdTime) {
+                        set(mode: .notRefreshing)
+                        self.renderLock = false
+                        
+                        DispatchQueue.main.asyncAfter(deadline: .now() + config.cooldown) {
+                            self.canRefresh = !isFingerDown
+                            self.isRefresherVisible = false
+                        }
                     }
                 }
-            }
 
-        } else if distance > 0, state.mode != .refreshing {
-            set(mode: .pulling)
+            } else if distance > 0, state.mode != .refreshing {
+                set(mode: .pulling)
+            }
         }
     }
     
@@ -323,16 +336,21 @@ struct ProtectedIntrospectModifier: ViewModifier {
             .introspect(.scrollView, on: .iOS(.v14, .v15, .v16, .v17, .v18)) { scrollView in
                 // 添加基本的验证，但不阻止正常功能
                 guard scrollView.superview != nil else {
+                    // 使用异步调度避免在视图更新期间修改状态
                     if !hasAttemptedIntrospect {
-                        hasAttemptedIntrospect = true
-                        onError()
+                        DispatchQueue.main.async {
+                            hasAttemptedIntrospect = true
+                            onError()
+                        }
                     }
                     return
                 }
                 
-                // 记录成功尝试
-                hasAttemptedIntrospect = true
-                onScrollViewFound(scrollView)
+                // 使用异步调度记录成功尝试
+                DispatchQueue.main.async {
+                    hasAttemptedIntrospect = true
+                    onScrollViewFound(scrollView)
+                }
             }
             .background(
                 // Fallback: 如果introspect完全失败，提供手动检测
