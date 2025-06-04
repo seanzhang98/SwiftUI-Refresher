@@ -111,6 +111,11 @@ public struct RefreshableScrollView<Content: View, RefreshView: View>: View {
     @State private var isFingerDown = false
     @State private var canRefresh = true
     
+    // MARK: - 新增：SwiftUIIntrospect兼容性相关状态
+    @State private var introspectRetryCount = 0
+    @State private var introspectStable = true
+    @State private var lastIntrospectTime: Date = Date()
+    
     init(
         axes: Axis.Set = .vertical,
         showsIndicators: Bool = true,
@@ -157,6 +162,18 @@ public struct RefreshableScrollView<Content: View, RefreshView: View>: View {
     
     private var showRefreshControls: Bool {
         return isFingerDown || isRefresherVisible
+    }
+    
+    // MARK: - 判断是否应该使用Introspect
+    private var shouldUseIntrospect: Bool {
+        // 在复杂动画期间禁用introspect以避免崩溃
+        let isAnimating = state.mode == .refreshing ||
+                         (state.mode == .pulling && state.dragPosition > 0.8)
+        
+        // 如果最近发生过错误，暂时禁用
+        let recentError = Date().timeIntervalSince(lastIntrospectTime) < 1.0 && !introspectStable
+        
+        return !isAnimating && !recentError && introspectRetryCount < 3
     }
     
     @ViewBuilder
@@ -219,17 +236,45 @@ public struct RefreshableScrollView<Content: View, RefreshView: View>: View {
                     refreshSpinner
                 }
             }
-            .introspect(.scrollView, on: .iOS(.v14, .v15, .v16, .v17, .v18)) { scrollView in
-                DispatchQueue.main.async {
-                    uiScrollView = scrollView
+            // MARK: - 修改：安全的SwiftUIIntrospect调用
+            .modifier(SafeIntrospectModifier(
+                shouldIntrospect: shouldUseIntrospect,
+                onScrollViewFound: { scrollView in
+                    DispatchQueue.main.async {
+                        self.uiScrollView = scrollView
+                        self.introspectStable = true
+                        self.introspectRetryCount = 0
+                    }
+                },
+                onError: {
+                    self.introspectStable = false
+                    self.lastIntrospectTime = Date()
+                    self.introspectRetryCount += 1
+                    
+                    // 延迟重试
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        if self.introspectRetryCount < 3 {
+                            self.introspectStable = true
+                        }
+                    }
                 }
-            }
+            ))
             .onChange(of: globalGeometry.frame(in: .global)) { val in
                 headerInset = val.minY
             }
             .onAppear {
                 DispatchQueue.main.async {
                     headerInset = globalGeometry.frame(in: .global).minY
+                }
+            }
+            // MARK: - 监听状态变化以重置introspect
+            .onChange(of: state.mode) { newMode in
+                if newMode == .notRefreshing {
+                    // 刷新完成后重置introspect状态
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        introspectStable = true
+                        introspectRetryCount = 0
+                    }
                 }
             }
         }
@@ -288,5 +333,72 @@ public struct RefreshableScrollView<Content: View, RefreshView: View>: View {
         withAnimation {
             state.modeAnimated = mode
         }
+    }
+}
+
+// MARK: - 安全的SwiftUIIntrospect修饰器
+
+struct SafeIntrospectModifier: ViewModifier {
+    let shouldIntrospect: Bool
+    let onScrollViewFound: (UIScrollView) -> Void
+    let onError: () -> Void
+    
+    func body(content: Content) -> some View {
+        if shouldIntrospect {
+            content
+                .introspect(.scrollView, on: .iOS(.v14, .v15, .v16, .v17, .v18)) { scrollView in
+                    // 添加错误处理
+                    do {
+                        // 验证scrollView是否有效
+                        guard !scrollView.isHidden,
+                              scrollView.superview != nil else {
+                            onError()
+                            return
+                        }
+                        
+                        onScrollViewFound(scrollView)
+                    } catch {
+                        // 捕获任何异常
+                        onError()
+                    }
+                }
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: - 备用的手动滚动检测（作为fallback）
+
+struct ManualScrollTracker: UIViewRepresentable {
+    let onScrollViewFound: (UIScrollView) -> Void
+    
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        
+        // 使用延迟查找父级ScrollView
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            if let scrollView = view.findParentScrollView() {
+                onScrollViewFound(scrollView)
+            }
+        }
+        
+        return view
+    }
+    
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+extension UIView {
+    func findParentScrollView() -> UIScrollView? {
+        var current: UIView? = self
+        while let parent = current?.superview {
+            if let scrollView = parent as? UIScrollView {
+                return scrollView
+            }
+            current = parent
+        }
+        return nil
     }
 }
