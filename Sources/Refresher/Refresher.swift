@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import SwiftUIIntrospect
 import RenderLock
+@_spi(Advanced) import SwiftUIIntrospect
 
 public typealias RefreshAction = (_ completion: @escaping () -> ()) -> ()
 public typealias AsyncRefreshAction = () async -> ()
